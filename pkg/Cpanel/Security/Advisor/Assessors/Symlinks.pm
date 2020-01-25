@@ -18,7 +18,7 @@ package Cpanel::Security::Advisor::Assessors::Symlinks;
 # THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
 # ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
 # WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL  BE LIABLE FOR ANY
+# DISCLAIMED. IN NO EVENT SHALL cPanel, L.L.C. BE LIABLE FOR ANY
 # DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
 # (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
 # LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
@@ -29,141 +29,36 @@ package Cpanel::Security::Advisor::Assessors::Symlinks;
 use strict;
 use warnings;
 
-use Lchown ();
-
-use Cpanel::TempFile      ();
-use Cpanel::GenSysInfo    ();
-use Cpanel::Config::Httpd ();
+use Cpanel::Sys::Uname ();
 
 use base 'Cpanel::Security::Advisor::Assessors';
 
 sub generate_advice {
     my ($self) = @_;
-    $self->_check_for_symlink_kernel_patch;
 
-    return 1;
-}
+    if ( $self->has_cpanel_hardened_kernel() ) {
+        $self->add_warn_advice(
+            'key'  => 'Symlinks_protection_no_longer_support_hardened_kernel',
+            'text' => $self->_lh->maketext('Unsupported cPanel hardened kernel detected.'),
 
-sub _enforcing_symlink_ownership {
-    my $self = shift;
-
-    my @sysctls = qw(
-      /proc/sys/kernel/grsecurity/enforce_symlinksifowner
-      /proc/sys/fs/enforce_symlinksifowner
-    );
-
-    foreach my $sysctl (@sysctls) {
-        if ( -e $sysctl ) {
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-sub _symlink_enforcement_gid {
-    my $self = shift;
-
-    my @sysctls = qw(
-      /proc/sys/kernel/grsecurity/symlinkown_gid
-      /proc/sys/fs/symlinkown_gid
-    );
-
-    foreach my $sysctl (@sysctls) {
-        if ( -e $sysctl ) {
-            open my $fh, q{<}, $sysctl or die $!;
-            my $val = <$fh>;
-            close $fh;
-            chomp $val;
-            return int $val;
-        }
-    }
-
-    return undef;
-}
-
-sub _check_for_symlink_kernel_patch {
-    my ($self) = @_;
-
-    my $security_advisor_obj = $self->{'security_advisor_obj'};
-
-    my $sysinfo = Cpanel::GenSysInfo::run();
-
-    #
-    # This test only pertains to RHEL/CentOS 6.
-    #
-    return 1 unless $sysinfo->{'rpm_dist_ver'} == 6;
-
-    my $is_ea4 = ( defined &Cpanel::Config::Httpd::is_ea4 && Cpanel::Config::Httpd::is_ea4() ) ? 1 : 0;
-
-    #
-    # If a grsecurity kernel is not detected, then we should recommend that
-    # the administrator install one.
-    #
-    unless ( $self->_enforcing_symlink_ownership() ) {
-        $self->add_bad_advice(
-            'key'        => q{Symlinks_no_kernel_support_for_ownership_attacks_1},
-            'text'       => $self->_lh->maketext('Kernel does not support the prevention of symlink ownership attacks.'),
             'suggestion' => $self->_lh->maketext(
-                'You do not appear to have any symlink protection enabled through a properly patched kernel on this server, which provides additional protections beyond those solutions employed in userland. Please review [output,url,_1,the documentation,_2,_3] to learn how to apply this protection.',
-                ($is_ea4) ? 'https://go.cpanel.net/EA4Symlink' : 'https://go.cpanel.net/apachesymlink',
-                'target',
-                '_blank'
+                "[asis,cPanel] no longer supports the hardened kernel. We recommend that you use [asis,KernelCare's] free symlink protection. In order to enable [asis,KernelCare], you must replace the hardened kernel with a standard kernel. For instructions, please read the document on [output,url,_1,How to Manually Remove the cPanel-Provided Hardened Kernel,_2,_3].",
+                'https://go.cpanel.net/uninstallhardenedkernel', 'target', '_blank'
             ),
         );
 
-        return 1;
     }
-
-    my $gid = $self->_symlink_enforcement_gid();
-
-    unless ( defined $gid ) {
-        $self->add_bad_advice(
-            'key'        => q{Symlinks_no_kernel_support_for_ownership_attacks_2},
-            'text'       => $self->_lh->maketext('Kernel does not support the prevention of symlink ownership attacks.'),
-            'suggestion' => $self->_lh->maketext(
-                'You do not appear to have any symlink protection enabled through a properly patched kernel on this server, which provides additional protections beyond those solutions employed in userland. Please review [output,url,_1,the documentation,_2,_3] to learn how to apply this protection.',
-                ($is_ea4) ? 'https://go.cpanel.net/EA4Symlink' : 'https://go.cpanel.net/apachesymlink',
-                'target',
-                '_blank'
-            ),
-        );
-
-        return 1;
-    }
-
-    my $shadow = '/etc/shadow';
-    my $tmpobj = Cpanel::TempFile->new;
-    my $dir    = $tmpobj->dir;
-    my $link   = "$dir/shadow";
-
-    chmod 0755, $dir;
-
-    symlink $shadow => $link or die "Unable to symlink() $shadow to $link: $!";
-
-    Lchown::lchown( $gid, $gid, $link ) or die "Unable to lchown() $link: $!";
-
-    {
-        local $) = $gid;
-
-        if ( open my $fh, '<', $link ) {
-            $self->add_bad_advice(
-                'key'        => q{Symlinks_protection_not_enabled_for_centos6},
-                'text'       => $self->_lh->maketext('Kernel symlink protection is not enabled for CentOS 6.'),
-                'suggestion' => $self->_lh->maketext('You do not appear to have any symlink protection enabled through a properly patched kernel on this server, which provides additional protect beyond those solutions employed in userland. Please review the following documentation to learn how to apply this protection.'),
-            );
-
-            close $fh;
-        }
-        else {
-            $self->add_good_advice(
-                'key'  => q{Symlinks_protection_enabled_for_centos6},
-                'text' => $self->_lh->maketext('Kernel symlink protection is enabled for CentOS 6.'),
-            );
-        }
-    }
-
     return 1;
+}
+
+sub has_cpanel_hardened_kernel {
+    my $self         = shift;
+    my $kernel_uname = ( Cpanel::Sys::Uname::get_uname_cached() )[2];
+    my $ret;
+    if ( $kernel_uname =~ m/(?:cpanel|cp)6\.x86_64/ ) {
+        $ret = 1;
+    }
+    return $ret;
 }
 
 1;

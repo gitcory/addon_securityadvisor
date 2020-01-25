@@ -18,7 +18,7 @@ package Cpanel::Security::Advisor::Assessors::SSH;
 # THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
 # ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
 # WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL  BE LIABLE FOR ANY
+# DISCLAIMED. IN NO EVENT SHALL cPanel, L.L.C. BE LIABLE FOR ANY
 # DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
 # (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
 # LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
@@ -46,9 +46,9 @@ sub generate_advice {
 sub _check_for_ssh_settings {
     my ($self) = @_;
 
-    my $sshd_config = Whostmgr::Services::SSH::Config::get_config();
-
-    if ( $sshd_config->{'PasswordAuthentication'} =~ m/yes/i || $sshd_config->{'ChallengeResponseAuthentication'} =~ m/yes/i ) {
+    my $scfg        = Whostmgr::Services::SSH::Config->new();
+    my $sshd_config = $scfg->get_config();
+    if ( $scfg->get_config('PasswordAuthentication') =~ m/yes/i || $scfg->get_config('ChallengeResponseAuthentication') =~ m/yes/i ) {
         $self->add_bad_advice(
             'key'        => 'SSH_password_authentication_enabled',
             'text'       => $self->_lh->maketext('SSH password authentication is enabled.'),
@@ -68,7 +68,7 @@ sub _check_for_ssh_settings {
 
     }
 
-    if ( $sshd_config->{'PermitRootLogin'} =~ m/yes/i || !$sshd_config->{'PermitRootLogin'} ) {
+    if ( !$scfg->get_config('PermitRootLogin') || $scfg->get_config('PermitRootLogin') =~ m/yes/i ) {
         $self->add_bad_advice(
             'key'        => 'SSH_direct_root_login_permitted',
             'text'       => $self->_lh->maketext('SSH direct root logins are permitted.'),
@@ -108,7 +108,7 @@ sub _check_for_ssh_version {
                 'text'       => $self->_lh->maketext('Current SSH version is out of date.'),
                 'suggestion' => $self->_lh->maketext(
                     'Update current system software in the “[output,url,_1,Update System Software,_2,_3]” area',
-                    $self->base_path('scripts/dialog?dialog=updatesyssoftware'),
+                    $self->base_path('scripts/dialog?dialog=updatesrvsoftware'),
                     'target',
                     '_blank'
                 ),

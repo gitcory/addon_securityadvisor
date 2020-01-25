@@ -1,6 +1,6 @@
-package Cpanel::Security::Advisor::Assessors::Iptables;
+package Test::Assessor;
 
-# Copyright (c) 2013, cPanel, Inc.
+# Copyright (c) 2017, cPanel, Inc.
 # All rights reserved.
 # http://cpanel.net
 #
@@ -27,39 +27,66 @@ package Cpanel::Security::Advisor::Assessors::Iptables;
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use strict;
-use base 'Cpanel::Security::Advisor::Assessors';
-use Cpanel::SafeRun::Simple;
+use warnings;
+
+use Cpanel::Locale ();
+use Cpanel::Security::Advisor ();    # For ADVISE_GOOD, et. al.
+
+sub new {
+    my ( $class, %options ) = @_;
+
+    my $module_name = "Cpanel::Security::Advisor::Assessors::$options{assessor}";
+
+    my $self = bless {
+        locale => Cpanel::Locale->get_handle(),
+        advice => [],
+    }, $class;
+
+    eval "require $module_name" or die $@;    ##no critic (ProhibitStringyEval) -- require $module_name; doesn't work for some reason.
+    my $assessor = "$module_name"->new($self);
+    $self->{assessor} = $assessor;
+
+    return $self;
+}
 
 sub generate_advice {
     my ($self) = @_;
-    $self->_is_iptables_active();
-
-    return 1;
+    return $self->{assessor}->generate_advice();
 }
 
-sub _is_iptables_active {
+sub add_advice {
+    my ( $self, $advice ) = @_;
 
-    my ($self) = @_;
-
-    my $security_advisor_obj = $self->{'security_advisor_obj'};
-
-    if ( -x '/etc/init.d/iptables' ) {
-        my $status_check = `/etc/init.d/iptables status`;
-
-        # need a better way to check this
-        if ( $status_check =~ m/not running/i ) {
-            $security_advisor_obj->add_advice(
-                {
-                    'key'        => 'Iptables_firewall_not_running',
-                    'type'       => $Cpanel::Security::Advisor::ADVISE_BAD,
-                    'text'       => $self->_lh->maketext('Firewall is not running'),
-                    'suggestion' => $self->_lh->maketext('This might be a simple matter of executing "/etc/init.d/iptables start"'),
-                },
-            );
+    # Some assessor modules call methods directly on instances of this class,
+    # and some use wrapper methods, so try to figure out the module name
+    # regardless of which path we took.
+    my ( $module, $function );
+    foreach my $level ( 1, 3 ) {
+        my $caller = ( caller($level) )[3];
+        if ( $caller =~ /(Cpanel::Security::Advisor::Assessors::.+)::([^:]+)$/ ) {
+            ( $module, $function ) = ( $1, $2 );
+            last;
         }
     }
 
-    return 1;
+    push @{ $self->{advice} }, {
+        module   => $module,
+        function => $function,
+        advice   => $advice,
+    };
+
+    return;
+}
+
+sub get_advice {
+    my ($self) = @_;
+    return $self->{advice};
+}
+
+sub clear_advice {
+    my ($self) = @_;
+    $self->{advice} = [];
+    return;
 }
 
 1;

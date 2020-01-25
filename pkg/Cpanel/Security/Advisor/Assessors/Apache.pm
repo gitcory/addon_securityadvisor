@@ -1,6 +1,6 @@
 package Cpanel::Security::Advisor::Assessors::Apache;
 
-# Copyright (c) 2016, cPanel, Inc.
+# Copyright (c) 2018, cPanel, L.L.C.
 # All rights reserved.
 # http://cpanel.net
 #
@@ -18,7 +18,7 @@ package Cpanel::Security::Advisor::Assessors::Apache;
 # THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
 # ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
 # WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL  BE LIABLE FOR ANY
+# DISCLAIMED. IN NO EVENT SHALL cPanel, L.L.C. BE LIABLE FOR ANY
 # DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
 # (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
 # LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
@@ -29,6 +29,7 @@ package Cpanel::Security::Advisor::Assessors::Apache;
 use strict;
 use base 'Cpanel::Security::Advisor::Assessors';
 use Cpanel::Config::Sources    ();
+use Cpanel::Config::Httpd::EA4 ();
 use Cpanel::HttpRequest        ();
 use Cpanel::HttpUtils::Version ();
 use Cpanel::SafeRun::Errors    ();
@@ -37,16 +38,21 @@ use Cpanel::Validate::Username ();
 use Cpanel::GenSysInfo         ();
 use Cpanel::DataStore          ();
 use Cpanel::RestartSrv         ();
+use Cpanel::KernelCare         ();
+use Cpanel::Version::Tiny      ();
 
 sub version {
-    return '1.03';
+    return '1.04';
 }
 
 sub generate_advice {
     my ($self) = @_;
+
+    my $can_have_ea3 = $Cpanel::Version::Tiny::major_version < 77 ? 1 : 0;
+    $self->_check_for_easyapache3_eol() if $can_have_ea3;
     $self->_check_for_apache_chroot();
-    $self->_check_for_easyapache_build();
-    $self->_check_for_eol_apache();
+    $self->_check_for_easyapache_build() if $can_have_ea3;
+    $self->_check_for_eol_apache()       if $can_have_ea3;
     $self->_check_for_symlink_protection();
     return 1;
 }
@@ -88,7 +94,8 @@ sub _check_for_apache_chroot {
                 'type'       => $Cpanel::Security::Advisor::ADVISE_BAD,
                 'text'       => $self->_lh->maketext('Apache vhosts are not segmented or chroot()ed.'),
                 'suggestion' => $self->_lh->maketext(
-                    'Enable “Jail Apache” in the “[output,url,_1,Tweak Settings,_4,_5]” area, and change users to jailshell in the “[output,url,_2,Manage Shell Access,_4,_5]” area.  Consider a more robust solution by using “[output,url,_3,CageFS on CloudLinux,_4,_5]”',
+                    'Enable “mod_ruid2” in the “[output,url,_1,EasyApache 4,_5,_6]” area, enable “Jail Apache” in the “[output,url,_2,Tweak Settings,_5,_6]” area, and change users to jailshell in the “[output,url,_3,Manage Shell Access,_5,_6]” area.  Consider a more robust solution by using “[output,url,_4,CageFS on CloudLinux,_5,_6]”.  Note that this may break the ability to access mailman via Apache.',
+                    $self->base_path('scripts7/EasyApache4'),
                     $self->base_path('scripts2/tweaksettings?find=jailapache'),
                     $self->base_path('scripts2/manageshells'),
                     'https://go.cpanel.net/cloudlinux',
@@ -134,6 +141,29 @@ sub _check_for_easyapache_build {
     return 1;
 }
 
+sub _check_for_easyapache3_eol {
+    my $self                 = shift;
+    my $security_advisor_obj = $self->{'security_advisor_obj'};
+
+    if ( !Cpanel::Config::Httpd::EA4::is_ea4() ) {
+        $security_advisor_obj->add_advice(
+            {
+                'key'        => 'Apache_easyapache3_going_eol',
+                'type'       => $Cpanel::Security::Advisor::ADVISE_BAD,
+                'text'       => $self->_lh->maketext('[asis,EasyApache 3] deprecated in [asis, cPanel amp() WHM] version 78'),
+                'suggestion' => $self->_lh->maketext('We deprecated [asis,EasyApache 3] on December 31, 2018.') . ' '
+                  . $self->_lh->maketext('[asis,cPanel amp() WHM] no longer updates [asis,EasyApache 3] and we removed all support for [asis,EasyApache 3] in version 78.')
+                  . '<br/><br/>'
+                  . $self->_lh->maketext('You [output,em,must] upgrade to [asis,EasyApache 4] in order to update your server with a newer version of [asis,cPanel amp() WHM].') . ' '
+                  . $self->_lh->maketext('If you do [output,em,not] update your server, you risk leaving your server vulnerable to several known security issues.')
+                  . '<br/><br/>'
+                  . $self->_lh->maketext( 'For more information, read our [output,url,_1,EasyApache 4 documentation,target,_blank].', 'https://go.cpanel.net/ea4' ),
+            }
+        );
+    }
+    return 1;
+}
+
 sub _check_for_eol_apache {
     my ($self) = @_;
     my $security_advisor_obj = $self->{'security_advisor_obj'};
@@ -167,13 +197,15 @@ sub _check_for_symlink_protection {
     if ( $kernel_type eq "cloudlinux" ) {
         $self->_cloudlinux_symlink_protection($ruid);
     }
-    elsif ( $kernel_type eq "grsec" ) {
-        $self->_grsecurity_symlink_protection();
-    }
     elsif ( $kernel_type eq "other" ) {
         $self->_centos_symlink_protection($ruid);
     }
     return 1;
+}
+
+sub _has_kc_free_patch_set {
+    my $state = shift;
+    return $state == $Cpanel::KernelCare::KC_FREE_PATCH_SET || $state == $Cpanel::KernelCare::KC_EXTRA_PATCH_SET;
 }
 
 sub _centos_symlink_protection {
@@ -189,12 +221,14 @@ sub _centos_symlink_protection {
     my $jailedapache         = $security_advisor_obj->{'cpconf'}->{'jailapache'};
     my $sysinfo              = Cpanel::GenSysInfo::run();
 
-    my $is_ea4 = ( defined &Cpanel::Config::Httpd::is_ea4 && Cpanel::Config::Httpd::is_ea4() ) ? 1 : 0;
-    my $bluehost_ea3 = ($is_ea4) ? 0 : grep { /SPT_DOCROOT/ } $httpd_binary;
-    my $local_settings = ($is_ea4) ? Cpanel::DataStore::fetch_ref('/var/cpanel/conf/apache/local') : undef;
-    my $bluehost_ea4 = ($is_ea4) ? ( exists $local_settings->{main}->{symlink_protect} && $local_settings->{main}->{symlink_protect}->{item}->{symlink_protect} eq 'On' ) : 0;
+    my $is_ea4         = ( defined &Cpanel::Config::Httpd::is_ea4 && Cpanel::Config::Httpd::is_ea4() ) ? 1                                                                                                                                      : 0;
+    my $bluehost_ea3   = ($is_ea4)                                                                     ? 0                                                                                                                                      : grep { /SPT_DOCROOT/ } $httpd_binary;
+    my $local_settings = ($is_ea4)                                                                     ? Cpanel::DataStore::fetch_ref('/var/cpanel/conf/apache/local')                                                                          : undef;
+    my $bluehost_ea4   = ($is_ea4)                                                                     ? ( exists $local_settings->{main}->{symlink_protect} && $local_settings->{main}->{symlink_protect}->{item}->{symlink_protect} eq 'On' ) : 0;
 
-    if ($ruid) {
+    my $kernelcare_state = Cpanel::KernelCare::get_kernelcare_state();
+
+    if ( $ruid and !_has_kc_free_patch_set($kernelcare_state) ) {
         if ($jailedapache) {
             $security_advisor_obj->add_advice(
                 {
@@ -220,7 +254,7 @@ sub _centos_symlink_protection {
             );
         }
     }
-    if ( $bluehost_ea3 || $bluehost_ea4 ) {
+    if ( !_has_kc_free_patch_set($kernelcare_state) and ( $bluehost_ea3 || $bluehost_ea4 ) ) {
         $security_advisor_obj->add_advice(
             {
                 'key'        => 'Apache_bluehost_provided_symlink_protection',
@@ -250,18 +284,18 @@ sub _centos_symlink_protection {
             }
         );
     }
-    if ( !($ruid) && !($rack911) && !($bluehost_ea3) && !($bluehost_ea4) && $sysinfo->{'rpm_dist_ver'} != 6 ) {    # if CentOS 6 is detected, defer to the Assessors::Symlinks
+    if ( !($ruid) && !($rack911) && !($bluehost_ea3) && !($bluehost_ea4) && !_has_kc_free_patch_set($kernelcare_state) ) {
+        my $text    = $self->_lh->maketext(q{Kernel does not support the prevention of symlink ownership attacks.});
+        my $doclink = $self->_lh->maketext(
+            q{You do not appear to have any symlink protection enabled through a properly patched kernel on this server, which provides additional protections beyond those solutions employed in userland. Please review [output,url,_1,the documentation,_2,_3] to learn how to apply this protection.},
+            ($is_ea4) ? 'https://go.cpanel.net/EA4Symlink' : 'https://go.cpanel.net/apachesymlink', 'target', '_blank'
+        );
         $security_advisor_obj->add_advice(
             {
                 'key'        => 'Apache_no_symlink_protection',
                 'type'       => $bad,
-                'text'       => $self->_lh->maketext('No symlink protection detected'),
-                'suggestion' => $self->_lh->maketext(
-                    'You do not appear to have any symlink protection enabled on this server. You can protect against this in multiple ways. Please review the following [output,url,_1,documentation,_2,_3] to find a solution that is suited to your needs.',
-                    ($is_ea4) ? 'https://go.cpanel.net/EA4Symlink' : 'https://go.cpanel.net/apachesymlink',
-                    'target',
-                    '_blank'
-                ),
+                'text'       => $text,
+                'suggestion' => $doclink,
             }
         );
     }
@@ -284,6 +318,7 @@ sub _cloudlinux_symlink_protection {
 
     my $is_ea4 = ( defined &Cpanel::Config::Httpd::is_ea4 && Cpanel::Config::Httpd::is_ea4() ) ? 1 : 0;
 
+  CHECK_IF_CAGEFS_IS_INSTALLED:
     if ( -x '/usr/sbin/cagefsctl' ) {
         my $uncaged_user_count = grep {
             !/^\d+ disabled/
@@ -293,6 +328,7 @@ sub _cloudlinux_symlink_protection {
               && !Cpanel::Validate::Username::reserved_username_check($_)
         } split( /\n/, Cpanel::SafeRun::Simple::saferun( '/usr/sbin/cagefsctl', '--list-disabled' ) );
 
+      CHECK_FOR_UNPROTECTED_USERS:    # Note: documentation on excluding users is at https://docs.cloudlinux.com/index.html?excluding_users.html
         if ( $uncaged_user_count > 0 ) {
             $security_advisor_obj->add_advice(
                 {
@@ -310,7 +346,8 @@ sub _cloudlinux_symlink_protection {
                 }
             );
         }
-        elsif ( !_is_cagefs_running() ) {
+      CHECK_IF_CAGEFS_IS_RUNNING:
+        if ( !_is_cagefs_running() ) {
             $security_advisor_obj->add_advice(
                 {
                     'key'        => 'Apache_cagefs_installed_but_not_running',
@@ -391,7 +428,7 @@ sub _is_cagefs_running {
     my $self = shift;
 
     if ( Cpanel::RestartSrv::has_service_via_systemd('cagefs') ) {
-        return ( Cpanel::SafeRun::Simple::saferun( '/usr/bin/systemctl', 'is-active', 'cagefs' ) eq 'active' ) ? 1 : 0;
+        return ( Cpanel::SafeRun::Simple::saferun( '/usr/bin/systemctl', 'is-active', 'cagefs' ) =~ /^active/ ) ? 1 : 0;
     }
     else {
         return ( Cpanel::SafeRun::Simple::saferun( '/etc/init.d/cagefs', 'status' ) =~ /running/ ) ? 1 : 0;
@@ -400,6 +437,7 @@ sub _is_cagefs_running {
     return;
 }
 
+# This subroutine determines the precise state of the system with respect the hardended grsec kernel.
 sub _grsecurity_symlink_protection {
     my $self                 = shift;
     my $security_advisor_obj = $self->{'security_advisor_obj'};
@@ -408,51 +446,37 @@ sub _grsecurity_symlink_protection {
     my $warn                 = $Cpanel::Security::Advisor::ADVISE_WARN;
     my $bad                  = $Cpanel::Security::Advisor::ADVISE_BAD;
     my ( $sysctl_kernel_grsecurity_symlinkown_gid, $sysctl_kernel_grsecurity_enforce_symlinksifowner ) = (
-        Cpanel::SafeRun::Simple::saferun( 'sysctl', '-n', 'kernel.grsecurity.symlinkown_gid' ),
-        Cpanel::SafeRun::Simple::saferun( 'sysctl', '-n', 'kernel.grsecurity.enforce_symlinksifowner' )
+        Cpanel::SafeRun::Simple::saferunallerrors( 'sysctl', '-n', 'kernel.grsecurity.symlinkown_gid' ),
+        Cpanel::SafeRun::Simple::saferunallerrors( 'sysctl', '-n', 'kernel.grsecurity.enforce_symlinksifowner' )
     );
+    my $grsec_state = q{unknown};
+
     if ( ( $sysctl_kernel_grsecurity_symlinkown_gid =~ /unknown/ ) && ( $sysctl_kernel_grsecurity_enforce_symlinksifowner =~ /unknown/ ) ) {
-        $security_advisor_obj->add_advice(
-            {
-                'key'        => 'Apache_grsecurity_does_not_have_sysctl_enabeled',
-                'type'       => $warn,
-                'text'       => $self->_lh->maketext('Apache Symlink Protection: Grsecruity does not have the sysctl option enabled'),
-                'suggestion' => $self->_lh->maketext(
-                    "It appears that the sysctl option may not have been selected for the grsec kernel. Due to this, it is not possible to verify the configuration of symlinkown_gid which is the gid of the Apache user that should not follow symlinks. This is usually 99 on cPanel servers. If you are confident that this is correct and do not wish to be able to easily verify your grsecurity kernel options, then you may disregard this message. Otherwise, please visit the [output,url,_1,Grsecurity Documentation,_2,_3] to learn more about enabling the sysctl option during kernel compilation.",
-                    'http://en.wikibooks.org/wiki/Grsecurity/Configuring_and_Installing_grsecurity#Suggestions',
-                    'target',
-                    '_blank'
-                ),
-            }
-        );
+
+        # It appears that the sysctl option may not have been selected for the grsec
+        # kernel. Due to this, it is not possible to verify the configuration of
+        # symlinkown_gid which is the gid of the Apache user that should not follow
+        # symlinks. This is usually 99 on cPanel servers. If you are confident that this
+        # is correct and do not wish to be able to easily verify your grsecurity kernel
+        # options, then you may disregard this message. Otherwise, please visit the
+        # Grsecurity Documentation to learn more about enabling the sysctl option during
+        # kernel compilation.
+        $grsec_state = q{Apache_grsecurity_does_not_have_sysctl_enabeled};
     }
     elsif (( $sysctl_kernel_grsecurity_symlinkown_gid != 99 )
         || ( $sysctl_kernel_grsecurity_enforce_symlinksifowner != 1 ) ) {
-        $security_advisor_obj->add_advice(
-            {
-                'key'        => 'Apache_grsecurity_sysctl_values',
-                'type'       => $bad,
-                'text'       => $self->_lh->maketext('Apache Symlink Protection: Grsecurity sysctl values'),
-                'suggestion' => $self->_lh->maketext(
-                    "It seems that your sysctl keys, enforce_symlinksifowner, and symlinkown_gid, may not be configured correctly for a cPanel server. Typically, enforce_symlinksifowner is set to 1, and symlinkown_gid is set to 99 on a cPanel server. For further information, see the [output,url,_1,Grsecurity Documentation,_2,_3].",
-                    'http://en.wikibooks.org/wiki/Grsecurity/Appendix/Grsecurity_and_PaX_Configuration_Options#Kernel-enforced_SymlinksIfOwnerMatch',
-                    'target',
-                    '_blank'
-                ),
-            }
-        );
+
+        # It seems that your sysctl keys, enforce_symlinksifowner, and
+        # symlinkown_gid, may not be configured correctly for a cPanel server. Typically,
+        # enforce_symlinksifowner is set to 1, and symlinkown_gid is set to 99 on a cPanel
+        # server. For further information, see the Grsecurity Documentation.
+        $grsec_state = q{Apache_grsecurity_sysctl_values};
     }
     else {
-        $security_advisor_obj->add_advice(
-            {
-                'key'        => 'Apache_grsecurity_protection_enabled',
-                'type'       => $good,
-                'text'       => $self->_lh->maketext('Apache Symlink Protection: You are well protected by grsecurity'),
-                'suggestion' => $self->_lh->maketext("You appear to have sufficient protections from Apache Symlink Attacks"),
-            }
-        );
+        # You appear to have sufficient protections from Apache Symlink Attacks.
+        $grsec_state = q{Apache_grsecurity_protection_enabled};
     }
-    return 1;
+    return $grsec_state;
 }
 
 my $httpd;
